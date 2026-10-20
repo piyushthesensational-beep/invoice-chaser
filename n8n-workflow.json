@@ -1,0 +1,681 @@
+{
+  "name": "Invoice Chaser - Accounting Follow-up Automation",
+  "nodes": [
+    {
+      "id": "sched-1",
+      "name": "Daily 9am Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24,
+              "triggerAtDay": true
+            }
+          ]
+        }
+      },
+      "notes": "Runs every day at 9:00. Set the workflow timezone to the firm's timezone."
+    },
+    {
+      "id": "sheets-read-1",
+      "name": "Read Tracker",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        400,
+        300
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PASTE_TRACKER_SHEET_ID_HERE"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tracker"
+        }
+      },
+      "notes": "ADD YOUR Google Sheets OAuth2 credential here. Document ID = the Invoice Chaser tracker sheet.",
+      "credentials": {}
+    },
+    {
+      "id": "code-filter-1",
+      "name": "Filter Due Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const ACTIVE = ['awaiting', 'f1_sent', 'f2_sent', 'final_sent'];\nconst today = new Date(); today.setHours(0,0,0,0);\nreturn items.filter(item => {\n  const s = (item.json.status || '').trim();\n  if (!ACTIVE.includes(s)) return false;\n  const raw = item.json.next_followup;\n  if (!raw) return true;\n  const d = new Date(raw); d.setHours(0,0,0,0);\n  return d <= today;\n});"
+      },
+      "notes": "Keeps only rows still being chased AND due today or earlier. Everything else is ignored."
+    },
+    {
+      "id": "loop-1",
+      "name": "Loop Rows",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        820,
+        300
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "notes": "One client at a time, so a failure on one row never blocks the others."
+    },
+    {
+      "id": "code-route-1",
+      "name": "Decide Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ],
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const stage = Number(item.json.followup_stage || 0);\n  item.json.route = stage >= 3 ? 'escalate' : 'email';\n  return item;\n});"
+      },
+      "notes": "Stage 0-2 -> send the next follow-up email. Stage 3 -> stop emailing, escalate to the accountant."
+    },
+    {
+      "id": "if-escalate-1",
+      "name": "Needs Escalation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1220,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "e1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "escalate",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "set-email-1",
+      "name": "Build Email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [
+        1420,
+        180
+      ],
+      "parameters": {
+        "mode": "manual",
+        "include": "all",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a-subject",
+              "name": "subject",
+              "type": "string",
+              "value": "{{ [\"Quick reminder: \" + $json.document_needed + \" still needed\", \"Second reminder: \" + $json.document_needed + \" needed this week\", \"Final notice: outstanding \" + $json.document_needed][$json.followup_stage] }}"
+            },
+            {
+              "id": "a-body",
+              "name": "body",
+              "type": "string",
+              "value": "{{ [\"Hi \" + $json.client_name + \",\\n\\n\" + \"Just a quick reminder that we are still waiting on \" + $json.document_needed + \" to complete your file. If you could send it over at your earliest convenience, that would be great.\" + \"\\n\\nReply to this email if anything is unclear, happy to help.\\n\\nThanks\", \"Hi \" + $json.client_name + \",\\n\\n\" + \"Following up on \" + $json.document_needed + \". \" + \"We need this by end of week to stay on schedule with your filing, and delays here can push back your submission.\" + \"\\n\\nCould you please send it over today, or let me know when to expect it?\\n\\nThanks\", \"Hi \" + $json.client_name + \",\\n\\n\" + \"This is our final automated reminder regarding \" + $json.document_needed + \". \" + \"We have not received it despite two earlier reminders, and this is now holding up your file.\" + \"\\n\\nYour accountant will be in touch directly to resolve this.\\n\\nRegards\"][$json.followup_stage] }}"
+            },
+            {
+              "id": "a-next",
+              "name": "next_stage",
+              "type": "number",
+              "value": "={{ $json.followup_stage + 1 }}"
+            },
+            {
+              "id": "a-status",
+              "name": "next_status",
+              "type": "string",
+              "value": "{{ [\"f1_sent\", \"f2_sent\", \"final_sent\"][$json.followup_stage] }}"
+            },
+            {
+              "id": "a-today",
+              "name": "today",
+              "type": "string",
+              "value": "={{ $now.toISO().slice(0,10) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Picks subject/body for the client's current stage. Stage 0 -> template 1, stage 1 -> template 2, stage 2 -> template 3."
+    },
+    {
+      "id": "http-gemini-1",
+      "name": "Personalize with Gemini",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1620,
+        180
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=PASTE_GEMINI_API_KEY_HERE",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"contents\": [{\"parts\": [{\"text\": \"Write ONE warm, professional opening sentence for a payment-reminder email to a client called '\" + $json.client_name + \"' about outstanding '\" + $json.document_needed + \"'. No greeting, just the sentence, under 20 words.\"}]}]}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "notes": "ADD YOUR Gemini API key in the URL. On ANY error this node continues with the error output, and the IF node falls back to the static template. The send NEVER depends on the AI.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "if-gemini-1",
+      "name": "Gemini OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        180
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "g1",
+              "leftValue": "={{ $json.candidates }}",
+              "operator": {
+                "name": "exists",
+                "operation": "exists",
+                "type": "object"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "If Gemini returned a usable sentence, use it. Otherwise fall back to the static template."
+    },
+    {
+      "id": "set-merge-1",
+      "name": "Merge AI Line",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [
+        2020,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "include": "all",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "m-body",
+              "name": "body",
+              "type": "string",
+              "value": "={{ $json.candidates[0].content.parts[0].text + \"\\n\\n\" + $('Build Email').item.json.body }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Prepends the Gemini-written opening line to the template body."
+    },
+    {
+      "id": "gmail-send-1",
+      "name": "Send Follow-up",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        180
+      ],
+      "parameters": {
+        "resource": "message",
+        "emailType": "text",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.body }}",
+        "sendTo": "={{ $json.client_email }}",
+        "options": {}
+      },
+      "notes": "ADD YOUR Gmail OAuth2 credential here. Sends from the firm's Gmail account.",
+      "credentials": {},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sheets-update-1",
+      "name": "Update Tracker Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2420,
+        180
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PASTE_TRACKER_SHEET_ID_HERE"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tracker"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "client_email"
+          ],
+          "value": {
+            "client_email": "={{ $json.client_email }}",
+            "followup_stage": "={{ $json.next_stage }}",
+            "last_sent": "={{ $json.today }}",
+            "status": "={{ $json.next_status }}"
+          }
+        }
+      },
+      "notes": "ADD YOUR Google Sheets OAuth2 credential here. Advances the row: stage +1, status updated, last_sent = today.",
+      "credentials": {},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sheets-log-1",
+      "name": "Log Email",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2620,
+        180
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PASTE_TRACKER_SHEET_ID_HERE"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Email Log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toISO() }}",
+            "client_email": "={{ $json.client_email }}",
+            "stage": "={{ $json.next_stage }}",
+            "subject": "={{ $json.subject }}",
+            "status": "sent"
+          }
+        }
+      },
+      "notes": "ADD YOUR Google Sheets OAuth2 credential here. Appends every send to the Email Log tab for audit.",
+      "credentials": {}
+    },
+    {
+      "id": "gmail-esc-1",
+      "name": "Escalate to Accountant",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        440
+      ],
+      "parameters": {
+        "resource": "message",
+        "emailType": "text",
+        "subject": "={{ \"Escalation: \" + $json.client_name + \" unresponsive after 3 follow-ups\" }}",
+        "message": "={{ \"Escalation needed: \" + $json.client_name + \" (\" + $json.client_email + \") \" + \"has not responded to 3 follow-ups about '\" + $json.document_needed + \"'. \" + \"Last sent: \" + $json.last_sent + \". Please contact them directly.\" }}",
+        "sendTo": "={{ $json.accountant_email }}",
+        "options": {}
+      },
+      "notes": "ADD YOUR Gmail OAuth2 credential here. After 3 unanswered follow-ups the accountant gets a summary and the automation stops emailing the client.",
+      "credentials": {},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "sheets-esc-1",
+      "name": "Mark Escalated",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1620,
+        440
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PASTE_TRACKER_SHEET_ID_HERE"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tracker"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "client_email"
+          ],
+          "value": {
+            "client_email": "={{ $json.client_email }}",
+            "status": "escalated",
+            "notes": "Escalated after 3 unanswered follow-ups"
+          }
+        }
+      },
+      "notes": "ADD YOUR Google Sheets OAuth2 credential here. Flags the row as escalated so it leaves the chase loop.",
+      "credentials": {}
+    },
+    {
+      "id": "gmail-alert-1",
+      "name": "Alert Owner",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        640
+      ],
+      "parameters": {
+        "resource": "message",
+        "emailType": "text",
+        "subject": "Invoice Chaser: automation error needs attention",
+        "message": "Invoice Chaser hit an error. Check the Email Log tab (status=failed) for details. The failing item's data is attached to this run's error output.",
+        "sendTo": "PASTE_OWNER_EMAIL_HERE",
+        "options": {}
+      },
+      "notes": "ADD YOUR Gmail OAuth2 credential here. Wire each risky node's ERROR output (second output) into this node.",
+      "credentials": {}
+    },
+    {
+      "id": "sheets-fail-1",
+      "name": "Log Failure",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2220,
+        640
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PASTE_TRACKER_SHEET_ID_HERE"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Email Log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toISO() }}",
+            "client_email": "={{ $json.client_email || 'unknown' }}",
+            "stage": "={{ $json.followup_stage || '' }}",
+            "subject": "={{ 'FAILED: ' + ($json.subject || 'send step') }}",
+            "status": "failed"
+          }
+        }
+      },
+      "notes": "ADD YOUR Google Sheets OAuth2 credential here. Failures are logged, never silent.",
+      "credentials": {}
+    }
+  ],
+  "connections": {
+    "Daily 9am Check": {
+      "main": [
+        [
+          {
+            "node": "Read Tracker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Tracker": {
+      "main": [
+        [
+          {
+            "node": "Filter Due Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Due Rows": {
+      "main": [
+        [
+          {
+            "node": "Loop Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Rows": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Decide Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Route": {
+      "main": [
+        [
+          {
+            "node": "Needs Escalation?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Escalation?": {
+      "main": [
+        [
+          {
+            "node": "Escalate to Accountant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate to Accountant": {
+      "main": [
+        [
+          {
+            "node": "Mark Escalated",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Escalated": {
+      "main": [
+        [
+          {
+            "node": "Loop Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email": {
+      "main": [
+        [
+          {
+            "node": "Personalize with Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Personalize with Gemini": {
+      "main": [
+        [
+          {
+            "node": "Gemini OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini OK?": {
+      "main": [
+        [
+          {
+            "node": "Merge AI Line",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge AI Line": {
+      "main": [
+        [
+          {
+            "node": "Send Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Update Tracker Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Tracker Row": {
+      "main": [
+        [
+          {
+            "node": "Log Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Email": {
+      "main": [
+        [
+          {
+            "node": "Loop Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Owner": {
+      "main": [
+        [
+          {
+            "node": "Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null
+}
